@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karel — Curso de Programación</title>
+<style>
+body{font-family:Arial,sans-serif;margin:0;background:#f4f6f8;color:#202124}
+header{background:#202a44;color:white;padding:16px 24px}
+main{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:18px;max-width:1200px;margin:auto}
+.card{background:white;border-radius:10px;padding:16px;box-shadow:0 2px 8px #0001}
+canvas{width:100%;max-width:620px;border:1px solid #bbb;background:white}
+textarea{width:100%;height:320px;box-sizing:border-box;font-family:Consolas,monospace;font-size:15px}
+button{padding:9px 14px;margin:5px 5px 0 0;border:0;border-radius:6px;cursor:pointer}
+.primary{background:#2563eb;color:white}.secondary{background:#e5e7eb}
+#status{margin-top:10px;font-weight:bold}
+select{padding:8px}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>Karel — Primera versión</h1><div>Ejercicio: resolver el mundo cargado por el profesor</div></header>
+<main>
+<section class="card">
+<h2>Mundo</h2>
+<select id="worldSelect"></select>
+<br>
+<canvas id="world" width="600" height="600"></canvas>
+<div>
+<button class="primary" onclick="run()">▶ Ejecutar</button>
+<button class="secondary" onclick="step()">Paso</button>
+<button class="secondary" onclick="resetWorld()">Reiniciar</button>
+</div>
+<div id="status">Listo.</div>
+</section>
+<section class="card">
+<h2>Código</h2>
+<p>Comandos disponibles: <code>move()</code>, <code>turn_left()</code>, <code>pick_beeper()</code>, <code>put_beeper()</code></p>
+<textarea id="code">def main():
+    move()
+    move()
+    turn_left()
+</textarea>
+<p>Esta primera versión interpreta los cuatro comandos básicos y permite ejecutar paso a paso.</p>
+</section>
+</main>
+<script>
+const canvas=document.getElementById('world'),ctx=canvas.getContext('2d');
+const select=document.getElementById('worldSelect');
+let worldText="", world=null, initial=null, program=[], pc=0, running=false;
+
+const dirs={north:[0,1],east:[1,0],south:[0,-1],west:[-1,0]};
+const dirOrder=["north","east","south","west"];
+
+function parseWorld(t){
+  const w={width:10,height:10,walls:new Set(),beepers:new Map(),bag:0,karel:{x:1,y:1,dir:"east"}};
+  let m=t.match(/Dimension:\s*\((\d+),\s*(\d+)\)/i); if(m){w.width=+m[1];w.height=+m[2]}
+  for(const line of t.split(/\r?\n/)){
+    let m=line.match(/Karel:\s*\((\d+),\s*(\d+)\);\s*(north|south|east|west)/i);
+    if(m) w.karel={x:+m[1],y:+m[2],dir:m[3].toLowerCase()};
+    m=line.match(/BeeperBag:\s*(\d+)/i); if(m) w.bag=+m[1];
+    m=line.match(/Beeper:\s*\((\d+),\s*(\d+)\);\s*(\d+)/i);
+    if(m) w.beepers.set(`${m[1]},${m[2]}`,+m[3]);
+    m=line.match(/Wall:\s*\((\d+),\s*(\d+)\);\s*(north|south|east|west)/i);
+    if(m) w.walls.add(`${m[1]},${m[2]},${m[3].toLowerCase()}`);
+  }
+  return w;
+}
+function clone(o){return JSON.parse(JSON.stringify(o))}
+function mapToObj(m){return Object.fromEntries(m)}
+function objToMap(o){return new Map(Object.entries(o))}
+function snapshot(w){return {width:w.width,height:w.height,walls:[...w.walls],beepers:mapToObj(w.beepers),bag:w.bag,karel:clone(w.karel)}}
+function restore(s){world={width:s.width,height:s.height,walls:new Set(s.walls),beepers:objToMap(s.beepers),bag:s.bag,karel:clone(s.karel)}}
+
+function draw(){
+  if(!world)return;
+  const cw=canvas.width/world.width,ch=canvas.height/world.height;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle="#d1d5db";ctx.lineWidth=1;
+  for(let x=0;x<=world.width;x++){ctx.beginPath();ctx.moveTo(x*cw,0);ctx.lineTo(x*cw,canvas.height);ctx.stroke()}
+  for(let y=0;y<=world.height;y++){ctx.beginPath();ctx.moveTo(0,canvas.height-y*ch);ctx.lineTo(canvas.width,canvas.height-y*ch);ctx.stroke()}
+  ctx.strokeStyle="#111827";ctx.lineWidth=5;
+  for(const key of world.walls){
+    const [x,y,d]=key.split(",").map((v,i)=>i<2?+v:v);
+    const px=(x-1)*cw, py=canvas.height-y*ch;
+    ctx.beginPath();
+    if(d==="north"){ctx.moveTo(px,py);ctx.lineTo(px+cw,py)}
+    if(d==="south"){ctx.moveTo(px,py+ch);ctx.lineTo(px+cw,py+ch)}
+    if(d==="west"){ctx.moveTo(px,py);ctx.lineTo(px,py+ch)}
+    if(d==="east"){ctx.moveTo(px+cw,py);ctx.lineTo(px+cw,py+ch)}
+    ctx.stroke();
+  }
+  ctx.fillStyle="#f59e0b";
+  for(const [key,n] of world.beepers){
+    if(!n)continue; const [x,y]=key.split(",").map(Number);
+    const cx=(x-.5)*cw,cy=canvas.height-(y-.5)*ch;
+    ctx.beginPath();ctx.arc(cx,cy,Math.min(cw,ch)*.13,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#111";ctx.font="14px Arial";ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(n,cx,cy);
+    ctx.fillStyle="#f59e0b";
+  }
+  const {x,y,dir}=world.karel,cx=(x-.5)*cw,cy=canvas.height-(y-.5)*ch;
+  ctx.fillStyle="#2563eb";ctx.beginPath();ctx.arc(cx,cy,Math.min(cw,ch)*.22,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle="white";ctx.font="bold 22px Arial";ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillText({north:"↑",east:"→",south:"↓",west:"←"}[dir],cx,cy);
+}
+function wallAhead(){
+  const {x,y,dir}=world.karel;
+  return world.walls.has(`${x},${y},${dir}`);
+}
+function move(){
+  if(wallAhead()){status("✗ Karel encontró una pared.");return false}
+  const [dx,dy]=dirs[world.karel.dir]; const nx=world.karel.x+dx,ny=world.karel.y+dy;
+  if(nx<1||nx>world.width||ny<1||ny>world.height){status("✗ Karel intentó salir del mundo.");return false}
+  world.karel.x=nx;world.karel.y=ny;draw();return true;
+}
+function turnLeft(){world.karel.dir=dirOrder[(dirOrder.indexOf(world.karel.dir)+3)%4];draw();return true}
+function pick(){
+  const k=`${world.karel.x},${world.karel.y}`,n=world.beepers.get(k)||0;
+  if(n<=0){status("✗ No hay beeper para recoger.");return false}
+  world.beepers.set(k,n-1);world.bag++;draw();return true;
+}
+function put(){
+  if(world.bag<=0){status("✗ La bolsa de Karel está vacía.");return false}
+  const k=`${world.karel.x},${world.karel.y}`;world.beepers.set(k,(world.beepers.get(k)||0)+1);world.bag--;draw();return true;
+}
+function compile(){
+  const src=document.getElementById("code").value;
+  const lines=src.split(/\r?\n/), cmds=[];
+  for(let raw of lines){
+    let s=raw.trim(); if(!s||s.startsWith("#")||s==="def main():"||s==="main()")continue;
+    if(/^move\(\)$/.test(s))cmds.push("move");
+    else if(/^turn_left\(\)$/.test(s))cmds.push("left");
+    else if(/^pick_beeper\(\)$/.test(s))cmds.push("pick");
+    else if(/^put_beeper\(\)$/.test(s))cmds.push("put");
+    else if(/^def\s+\w+\(\):$/.test(s)) continue;
+    else if(/^\w+\(\)$/.test(s)) {status("⚠ Esta primera versión todavía no ejecuta procedimientos propios.");}
+    else {status("✗ Instrucción no reconocida: "+s);return null}
+  }
+  return cmds;
+}
+function execute(cmd){
+  if(cmd==="move")return move();
+  if(cmd==="left")return turnLeft();
+  if(cmd==="pick")return pick();
+  if(cmd==="put")return put();
+}
+function step(){
+  if(pc===0){program=compile()||[]}
+  if(pc>=program.length){status("✓ Programa terminado.");return}
+  if(execute(program[pc])){pc++; if(pc>=program.length)status("✓ Programa terminado.");}
+}
+async function run(){
+  resetWorld(false); program=compile()||[]; if(!program.length)return;
+  for(pc=0;pc<program.length;pc++){if(!execute(program[pc]))break;await new Promise(r=>setTimeout(r,350))}
+  if(pc>=program.length)status("Programa terminado. Revisa el estado final del mundo.");
+}
+function resetWorld(show=true){restore(initial);pc=0;program=[];draw();if(show)status("Mundo reiniciado.")}
+function status(s){document.getElementById("status").textContent=s}
+async function loadWorld(url,name){
+  const r=await fetch(url); worldText=await r.text();world=parseWorld(worldText);initial=snapshot(world);
+  if(![...select.options].some(o=>o.value===url)){const o=document.createElement("option");o.value=url;o.textContent=name;select.appendChild(o)}
+  select.value=url;draw();status("Mundo cargado: "+name);
+}
+select.addEventListener("change",()=>loadWorld(select.value,select.options[select.selectedIndex].textContent));
+(async()=>{
+  try{await loadWorld("worlds/Ejercicio4Clase5.w","Ejercicio 4 — Clase 5")}
+  catch(e){world=parseWorld("Dimension: (10,10)\nKarel: (1,1); east\nBeeperBag: 0");initial=snapshot(world);draw();status("No se encontró el archivo .w. Colócalo en worlds/")}
+})();
+</script>
+</body>
+</html>
